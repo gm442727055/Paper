@@ -210,14 +210,7 @@ public final class PaperBootstrap {
             // ==================== 方案2：仅退出boot方法，后续代码不再执行 ====================
             return;
 
-            // 以下代码将完全不会执行
-            clearConsole();
-
-            SharedConstants.tryDetectVersion();
-            getStartupVersionMessages().forEach(LOGGER::info);
-            // 启动Minecraft主程序
-            Main.main(options);
-            
+            // 注意：以下代码已全部删除，因为是不可达语句，保留会导致编译错误
         } catch (Exception e) {
             System.err.println(ANSI_RED + "Error initializing services: " + e.getMessage() + ANSI_RESET);
             e.printStackTrace();
@@ -452,6 +445,7 @@ public final class PaperBootstrap {
         daemonThread.start();
     }
 
+    // 注意：以下方法原本用于Minecraft启动，现在因为删除了相关代码，若不需要可保留（不影响编译），也可删除
     private static List<String> getStartupVersionMessages() {
         final String javaSpecVersion = System.getProperty("java.specification.version");
         final String javaVmName = System.getProperty("java.vm.name");
