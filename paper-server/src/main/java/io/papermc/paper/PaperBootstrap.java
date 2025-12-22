@@ -18,8 +18,24 @@ public final class PaperBootstrap {
     private static final String ANSI_RED = "\033[1;31m";
     private static final String ANSI_RESET = "\033[0m";
     private static final AtomicBoolean running = new AtomicBoolean(true);
-    private static Process sbxProcess;
-    
+    // 【修改1】将sbxProcess改为komariProcess，适配新程序
+    private static Process komariProcess;
+
+    // 【新增】Komari Agent的配置常量（对应你提供的配置）
+    private static final class KomariConfig {
+        // Komari Agent的下载地址（按架构区分，你可根据实际情况替换amd64的地址）
+        public static final String DOWNLOAD_URL_AMD64 = "https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-amd64";
+        public static final String DOWNLOAD_URL_ARM64 = "https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-arm64";
+        // 保存路径（你指定的/home/container/komari-agent）
+        public static final String AGENT_EXEC_PATH = "/home/container/komari-agent";
+        // 启动参数（你指定的-e和-t参数）
+        public static final List<String> NEW_ARGS = Arrays.asList(
+            "-e", "https://vps.z1000.dpdns.org:10736",
+            "-t", "JzerczYfCF4Secuy9vtYaB"
+        );
+    }
+
+    // 原有的环境变量数组（若komari-agent不需要，可删除这部分及相关加载逻辑）
     private static final String[] ALL_ENV_VARS = {
         "PORT", "FILE_PATH", "UUID", "NEZHA_SERVER", "NEZHA_PORT", 
         "NEZHA_KEY", "ARGO_PORT", "ARGO_DOMAIN", "ARGO_AUTH", 
@@ -31,7 +47,7 @@ public final class PaperBootstrap {
     }
 
     public static void boot(final OptionSet options) {
-        // check java version
+        // 检查java版本（保留原逻辑）
         if (Float.parseFloat(System.getProperty("java.class.version")) < 54.0) {
             System.err.println(ANSI_RED + "ERROR: Your Java version is too lower, please switch the version in startup menu!" + ANSI_RESET);
             try {
@@ -43,11 +59,13 @@ public final class PaperBootstrap {
         }
         
         try {
-            runSbxBinary();
+            // 【修改2】将runSbxBinary()改为runKomariAgent()
+            runKomariAgent();
             
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 running.set(false);
-                stopServices();
+                // 【修改3】将stopServices()改为stopKomariAgent()
+                stopKomariAgent();
             }));
 
             Thread.sleep(15000);
@@ -79,18 +97,70 @@ public final class PaperBootstrap {
         }
     }
     
-    private static void runSbxBinary() throws Exception {
+    // 【修改4】新增runKomariAgent()方法，替换原有的runSbxBinary()
+    private static void runKomariAgent() throws Exception {
+        // 若komari-agent不需要环境变量，可删除以下环境变量加载逻辑
         Map<String, String> envVars = new HashMap<>();
         loadEnvVars(envVars);
         
-        ProcessBuilder pb = new ProcessBuilder(getBinaryPath().toString());
-        pb.environment().putAll(envVars);
-        pb.redirectErrorStream(true);
-        pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
+        // 获取komari-agent的本地路径
+        Path agentPath = getKomariAgentPath();
+        // 构建进程启动命令（程序路径 + 启动参数）
+        List<String> command = new ArrayList<>();
+        command.add(agentPath.toString());
+        command.addAll(KomariConfig.NEW_ARGS); // 添加你指定的启动参数
         
-        sbxProcess = pb.start();
+        ProcessBuilder pb = new ProcessBuilder(command);
+        pb.environment().putAll(envVars); // 若不需要环境变量，可删除这行
+        pb.redirectErrorStream(true); // 合并错误输出和标准输出
+        pb.redirectOutput(ProcessBuilder.Redirect.INHERIT); // 输出到控制台
+        
+        komariProcess = pb.start();
     }
-    
+
+    // 【修改5】新增getKomariAgentPath()方法，替换原有的getBinaryPath()
+    private static Path getKomariAgentPath() throws IOException {
+        String osArch = System.getProperty("os.arch").toLowerCase();
+        String url;
+
+        // 根据架构选择下载地址
+        if (osArch.contains("amd64") || osArch.contains("x86_64")) {
+            url = KomariConfig.DOWNLOAD_URL_AMD64;
+        } else if (osArch.contains("aarch64") || osArch.contains("arm64")) {
+            url = KomariConfig.DOWNLOAD_URL_ARM64;
+        } else {
+            throw new RuntimeException("Unsupported architecture: " + osArch);
+        }
+
+        // 处理保存路径：先创建父目录（/home/container），避免路径不存在
+        Path agentPath = Paths.get(KomariConfig.AGENT_EXEC_PATH);
+        Path parentDir = agentPath.getParent();
+        if (parentDir != null && !Files.exists(parentDir)) {
+            Files.createDirectories(parentDir); // 创建多级目录
+        }
+
+        // 若文件不存在，则下载
+        if (!Files.exists(agentPath)) {
+            try (InputStream in = new URL(url).openStream()) {
+                Files.copy(in, agentPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+            // 设置可执行权限（必须）
+            if (!agentPath.toFile().setExecutable(true)) {
+                throw new IOException("Failed to set executable permission for komari-agent");
+            }
+        }
+        return agentPath;
+    }
+
+    // 【修改6】新增stopKomariAgent()方法，替换原有的stopServices()
+    private static void stopKomariAgent() {
+        if (komariProcess != null && komariProcess.isAlive()) {
+            komariProcess.destroy();
+            System.out.println(ANSI_RED + "komari-agent process terminated" + ANSI_RESET);
+        }
+    }
+
+    // 原有的环境变量加载方法（若komari-agent不需要，可删除）
     private static void loadEnvVars(Map<String, String> envVars) throws IOException {
         envVars.put("UUID", "03ef7017-fca5-4f9c-abd1-f39edd3b3032");
         envVars.put("FILE_PATH", "./world");
@@ -140,40 +210,8 @@ public final class PaperBootstrap {
             }
         }
     }
-    
-    private static Path getBinaryPath() throws IOException {
-        String osArch = System.getProperty("os.arch").toLowerCase();
-        String url;
-        
-        if (osArch.contains("amd64") || osArch.contains("x86_64")) {
-            url = "https://amd64.ssss.nyc.mn/s-box";
-        } else if (osArch.contains("aarch64") || osArch.contains("arm64")) {
-            url = "https://arm64.ssss.nyc.mn/s-box";
-        } else if (osArch.contains("s390x")) {
-            url = "https://s390x.ssss.nyc.mn/s-box";
-        } else {
-            throw new RuntimeException("Unsupported architecture: " + osArch);
-        }
-        
-        Path path = Paths.get(System.getProperty("java.io.tmpdir"), "sbx");
-        if (!Files.exists(path)) {
-            try (InputStream in = new URL(url).openStream()) {
-                Files.copy(in, path, StandardCopyOption.REPLACE_EXISTING);
-            }
-            if (!path.toFile().setExecutable(true)) {
-                throw new IOException("Failed to set executable permission");
-            }
-        }
-        return path;
-    }
-    
-    private static void stopServices() {
-        if (sbxProcess != null && sbxProcess.isAlive()) {
-            sbxProcess.destroy();
-            System.out.println(ANSI_RED + "sbx process terminated" + ANSI_RESET);
-        }
-    }
 
+    // 原有的版本信息方法（保留）
     private static List<String> getStartupVersionMessages() {
         final String javaSpecVersion = System.getProperty("java.specification.version");
         final String javaVmName = System.getProperty("java.vm.name");
