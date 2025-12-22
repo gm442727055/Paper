@@ -12,6 +12,9 @@ import java.util.regex.*;
 
 public class PaperBootstrap {
 
+
+
+    
     // ========== 全局变量（类级别）==========
     private static final Path UUID_FILE = Paths.get("data/uuid.txt");
     private static String uuid;
