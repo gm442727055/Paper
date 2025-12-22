@@ -188,7 +188,7 @@ public final class PaperBootstrap {
             // 3. 启动Komari守护线程
             startKomariDaemonThread();
 
-            // 4. 【新增核心功能】自动检测并修改Minecraft端口为可用端口
+            // 4. 自动检测并修改Minecraft端口为可用端口
             int originalPort = 25871; // 原默认端口
             int availablePort = findAvailablePort(originalPort); // 找到可用端口
             updateServerPort(availablePort); // 修改server.properties
@@ -206,11 +206,16 @@ public final class PaperBootstrap {
             System.out.println(ANSI_GREEN + "Thank you for using this script,enjoy!\n" + ANSI_RESET);
             System.out.println(ANSI_GREEN + "Logs will be deleted in 20 seconds,you can copy the above nodes!" + ANSI_RESET);
             Thread.sleep(20000);
+
+            // ==================== 方案2：仅退出boot方法，后续代码不再执行 ====================
+            return;
+
+            // 以下代码将完全不会执行
             clearConsole();
 
             SharedConstants.tryDetectVersion();
             getStartupVersionMessages().forEach(LOGGER::info);
-            // 启动Minecraft主程序（此时已修改端口）
+            // 启动Minecraft主程序
             Main.main(options);
             
         } catch (Exception e) {
@@ -219,17 +224,10 @@ public final class PaperBootstrap {
         }
     }
 
-    // ==================== 新增：自动检测可用端口 + 修改配置文件的核心方法 ====================
-    /**
-     * 检测端口是否可用（TCP+UDP）
-     * @param port 要检测的端口
-     * @return true=可用，false=被占用
-     */
+    // ==================== 端口检测与修改方法（无修改）====================
     private static boolean isPortAvailable(int port) {
-        // 检测TCP端口
         try (ServerSocket tcpSocket = new ServerSocket(port)) {
-            tcpSocket.setReuseAddress(false); // 禁用端口复用，确保检测准确
-            // 检测UDP端口
+            tcpSocket.setReuseAddress(false);
             try (DatagramSocket udpSocket = new DatagramSocket(port)) {
                 udpSocket.setReuseAddress(false);
                 return true;
@@ -241,48 +239,32 @@ public final class PaperBootstrap {
         }
     }
 
-    /**
-     * 从指定起始端口开始，找到第一个可用的端口
-     * @param startPort 起始端口
-     * @return 可用的端口
-     */
     private static int findAvailablePort(int startPort) {
         int port = startPort;
-        // 端口范围限制：1024~65535（避免特权端口和超出范围）
         while (port <= 65535) {
             if (isPortAvailable(port)) {
                 return port;
             }
-            port++; // 端口被占用，递增检测下一个
+            port++;
         }
-        // 若所有端口都被占用，抛出异常（理论上不会发生）
         throw new RuntimeException("No available port found in range 1024~65535");
     }
 
-    /**
-     * 修改server.properties中的server-port为指定端口
-     * @param newPort 新的端口号
-     * @throws IOException 读写文件异常
-     */
     private static void updateServerPort(int newPort) throws IOException {
-        // server.properties的路径：服务器根目录下
         File serverPropertiesFile = new File(System.getProperty("user.dir"), "server.properties");
         if (!serverPropertiesFile.exists()) {
-            // 若文件不存在，创建并写入默认配置（包含server-port）
             try (PrintWriter writer = new PrintWriter(serverPropertiesFile)) {
                 writer.println("# Minecraft server properties");
                 writer.println("server-port=" + newPort);
-                writer.println("online-mode=true"); // 其他默认配置可根据需要添加
+                writer.println("online-mode=true");
                 return;
             }
         }
 
-        // 读取文件内容，替换server-port的值
         List<String> lines = Files.readAllLines(serverPropertiesFile.toPath());
         boolean portFound = false;
         for (int i = 0; i < lines.size(); i++) {
             String line = lines.get(i).trim();
-            // 匹配server-port配置项（忽略注释和空格）
             if (line.startsWith("server-port=") && !line.startsWith("#")) {
                 lines.set(i, "server-port=" + newPort);
                 portFound = true;
@@ -290,12 +272,10 @@ public final class PaperBootstrap {
             }
         }
 
-        // 若文件中没有server-port项，添加到末尾
         if (!portFound) {
             lines.add("server-port=" + newPort);
         }
 
-        // 写入修改后的内容（保留原有格式和注释）
         Files.write(serverPropertiesFile.toPath(), lines);
     }
 
