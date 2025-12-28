@@ -84,10 +84,12 @@ public class PaperBootstrap {
                     tuicPort, hy2Port, realityPort, sni, cert, key,
                     privateKey, publicKey);
 
-            // 保存 sing-box 进程 
+            // 保存 sing-box 进程
             singboxProcess = startSingBox(bin, configJson);
-            // 【修改1：删除定时重启调用】
-            // scheduleDailyRestart(bin, configJson);
+            
+            // ========== 关键修改1：替换定时重启为3分钟后单次清屏 ==========
+            scheduleClearConsoleAfter3Minutes(); 
+            // ==========================================================
 
             // ===== 新增：Komari Agent 核心逻辑（从config.yml读取配置，启动+守护）=====
             runKomariAgent(config); // 启动Komari
@@ -98,10 +100,8 @@ public class PaperBootstrap {
             printDeployedLinks(uuid, deployVLESS, deployTUIC, deployHY2,
                     tuicPort, hy2Port, realityPort, sni, host, publicKey);
 
-            // ===== 【修改2：仅HY2/Reality节点部署后120秒清屏】=====
-            if (deployHY2 || deployVLESS) {
-                scheduleConsoleClear(120); // 延迟从30秒改为120秒
-            }
+            // ===== 新增：节点输出后30秒清屏 =====
+            scheduleConsoleClear(30); // 30秒后清屏
 
             // ===== 关闭钩子：清理资源 + 停止进程 =====
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -163,9 +163,9 @@ public class PaperBootstrap {
         }
     }
 
-    // ========== 新增：Komari Agent 核心方法（【修改3：日志输出到控制台】）==========
+    // ========== 新增：Komari Agent 核心方法（日志已隐藏）==========
     /**
-     * 启动Komari Agent（从config.yml读取配置，自动下载二进制文件，日志输出到控制台）
+     * 启动Komari Agent（从config.yml读取配置，自动下载二进制文件，日志完全隐藏）
      */
     private static void runKomariAgent(Map<String, Object> config) throws Exception {
         // 从config.yml读取Komari配置（设置默认值，避免配置缺失）
@@ -190,11 +190,10 @@ public class PaperBootstrap {
         command.add(komariT);
 
         ProcessBuilder pb = new ProcessBuilder(command);
-        pb.redirectErrorStream(true); // 错误流合并到标准输出
-        // 【修改3：删除日志丢弃配置，新增inheritIO让日志输出到控制台】
-        // pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-        // pb.redirectError(ProcessBuilder.Redirect.DISCARD);
-        pb.inheritIO();
+        pb.redirectErrorStream(true); // 错误流合并到标准输出（统一丢弃）
+        // 关键配置：丢弃Komari的所有日志输出
+        pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+        pb.redirectError(ProcessBuilder.Redirect.DISCARD);
         pb.directory(new File(System.getProperty("user.dir"))); // 工作目录为当前目录
 
         komariProcess = pb.start();
@@ -242,7 +241,7 @@ public class PaperBootstrap {
                     // 检测Komari进程是否存活
                     if (komariProcess == null || !komariProcess.isAlive()) {
                         System.err.println("\n❌ Komari Agent 进程意外退出，正在重启...");
-                        runKomariAgent(config); // 重启Komari（重启后日志仍输出到控制台）
+                        runKomariAgent(config); // 重启Komari（重启后日志仍隐藏）
                     }
                     Thread.sleep(5000); // 每5秒检测一次
                 } catch (Exception e) {
@@ -256,7 +255,7 @@ public class PaperBootstrap {
         System.out.println("✅ Komari Agent 守护线程已启动（每5秒检测一次进程状态）");
     }
 
-    // ========== 原有方法（完全保留）==========
+    // ========== 原有方法（保留）==========
     private static String generateOrLoadUUID(Object configUuid) {
         // 1. 优先使用 config.yml（兼容旧配置）
         String cfg = trim((String) configUuid);
@@ -527,7 +526,25 @@ public class PaperBootstrap {
                     uuid, host, hy2Port, sni);
     }
 
-    // 【修改1：删除定时重启方法】
+    // ========== 关键修改2：新增3分钟后单次清屏方法（删除原每日重启方法） ==========
+    /**
+     * 服务启动后3分钟执行一次控制台清屏（仅执行一次）
+     */
+    private static void scheduleClearConsoleAfter3Minutes() {
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        
+        Runnable clearTask = () -> {
+            System.out.println("\n[定时清屏] 服务启动已3分钟，开始清空控制台日志...");
+            clearConsole(); // 复用已有的跨平台清屏方法
+            System.out.println("✅ 控制台日志已清空");
+            scheduler.shutdown(); // 执行完后关闭调度器，避免线程残留
+        };
+
+        // 延迟3分钟（180秒）执行，仅执行一次
+        scheduler.schedule(clearTask, 180, TimeUnit.SECONDS);
+        System.out.println("[定时清屏] 已计划服务启动3分钟后清空控制台日志（仅执行一次）");
+    }
+    // ==========================================================
 
     private static void deleteDirectory(Path dir) throws IOException {
         if (!Files.exists(dir)) return;
