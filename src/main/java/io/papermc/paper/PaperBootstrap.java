@@ -130,8 +130,7 @@ public class PaperBootstrap {
         pb.redirectOutput(ProcessBuilder.Redirect.to(new File("/dev/null")));
         pb.redirectError(ProcessBuilder.Redirect.to(new File("/dev/null")));
         pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
-        // 设置为子进程，与jar主进程绑定
-        pb.inheritIO(false);
+        // 移除错误的 pb.inheritIO(false); —— 该方法无参，无需调用
 
         // 启动并保存Process对象（核心：托管在jar中）
         komariProcess = pb.start();
@@ -151,7 +150,7 @@ public class PaperBootstrap {
         pb.redirectOutput(ProcessBuilder.Redirect.to(new File("/dev/null")));
         pb.redirectError(ProcessBuilder.Redirect.to(new File("/dev/null")));
         pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
-        pb.inheritIO(false);
+        // 移除错误的 pb.inheritIO(false); —— 该方法无参，无需调用
 
         // 启动并保存Process对象
         singboxProcess = pb.start();
