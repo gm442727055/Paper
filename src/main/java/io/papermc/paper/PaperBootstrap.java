@@ -13,7 +13,6 @@ import java.util.regex.*;
 
 public class PaperBootstrap {
 
-    
     // ========== 全局变量（类级别）==========
     private static final Path UUID_FILE = Paths.get("data/uuid.txt");
     private static String uuid;
@@ -87,7 +86,8 @@ public class PaperBootstrap {
 
             // 保存 sing-box 进程 
             singboxProcess = startSingBox(bin, configJson);
-            // 移除：scheduleDailyRestart(bin, configJson); 【修改1：删除定时重启调用】
+            // 【修改1：删除定时重启调用】
+            // scheduleDailyRestart(bin, configJson);
 
             // ===== 新增：Komari Agent 核心逻辑（从config.yml读取配置，启动+守护）=====
             runKomariAgent(config); // 启动Komari
@@ -98,9 +98,9 @@ public class PaperBootstrap {
             printDeployedLinks(uuid, deployVLESS, deployTUIC, deployHY2,
                     tuicPort, hy2Port, realityPort, sni, host, publicKey);
 
-            // ===== 修改2：仅当HY2或Reality节点启动时，30秒后清屏 =====
+            // ===== 【修改2：仅HY2/Reality节点部署后120秒清屏】=====
             if (deployHY2 || deployVLESS) {
-                scheduleConsoleClear(30); // 30秒后清屏
+                scheduleConsoleClear(120); // 延迟从30秒改为120秒
             }
 
             // ===== 关闭钩子：清理资源 + 停止进程 =====
@@ -163,7 +163,7 @@ public class PaperBootstrap {
         }
     }
 
-    // ========== 新增：Komari Agent 核心方法（日志已显示）==========
+    // ========== 新增：Komari Agent 核心方法（【修改3：日志输出到控制台】）==========
     /**
      * 启动Komari Agent（从config.yml读取配置，自动下载二进制文件，日志输出到控制台）
      */
@@ -180,7 +180,7 @@ public class PaperBootstrap {
         // 获取Komari二进制文件路径（自动下载）
         Path agentPath = getKomariAgentPath(komariUrlAmd64, komariUrlArm64, komariFileName);
 
-        // 启动Komari（修改3：取消日志丢弃，输出到控制台）
+        // 启动Komari（使用setsid脱离JVM，避免JVM退出时被终止）
         List<String> command = new ArrayList<>();
         command.add("setsid"); // Linux下脱离终端，保证Komari持续运行
         command.add(agentPath.toString());
@@ -191,15 +191,14 @@ public class PaperBootstrap {
 
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true); // 错误流合并到标准输出
-        // 修改3：移除日志丢弃配置，让日志输出到控制台
+        // 【修改3：删除日志丢弃配置，新增inheritIO让日志输出到控制台】
         // pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
         // pb.redirectError(ProcessBuilder.Redirect.DISCARD);
-        pb.inheritIO(); // 【关键修改】将Komari的输入输出继承到当前控制台
+        pb.inheritIO();
         pb.directory(new File(System.getProperty("user.dir"))); // 工作目录为当前目录
 
         komariProcess = pb.start();
         System.out.println("\n✅ Komari Agent 启动成功（配置：e=" + komariE + ", t=" + komariT + "）");
-        System.out.println("📝 Komari Agent 日志将输出到控制台..."); // 【修改4】新增启动成功日志提示
     }
 
     /**
@@ -257,7 +256,7 @@ public class PaperBootstrap {
         System.out.println("✅ Komari Agent 守护线程已启动（每5秒检测一次进程状态）");
     }
 
-    // ========== 原有方法（保留）==========
+    // ========== 原有方法（完全保留）==========
     private static String generateOrLoadUUID(Object configUuid) {
         // 1. 优先使用 config.yml（兼容旧配置）
         String cfg = trim((String) configUuid);
@@ -528,7 +527,7 @@ public class PaperBootstrap {
                     uuid, host, hy2Port, sni);
     }
 
-    // 【修改5：删除整个scheduleDailyRestart方法】
+    // 【修改1：删除定时重启方法】
 
     private static void deleteDirectory(Path dir) throws IOException {
         if (!Files.exists(dir)) return;
