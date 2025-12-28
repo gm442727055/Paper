@@ -84,10 +84,9 @@ public class PaperBootstrap {
                     tuicPort, hy2Port, realityPort, sni, cert, key,
                     privateKey, publicKey);
 
-            // 保存 sing-box 进程 + 启动每日 00:03 重启
+            // 保存 sing-box 进程 
             singboxProcess = startSingBox(bin, configJson);
-            // 关键修正：将cfg改为configJson
-            scheduleDailyRestart(bin, configJson);
+            // 移除：scheduleDailyRestart(bin, configJson); 【修改1：删除定时重启调用】
 
             // ===== 新增：Komari Agent 核心逻辑（从config.yml读取配置，启动+守护）=====
             runKomariAgent(config); // 启动Komari
@@ -98,8 +97,10 @@ public class PaperBootstrap {
             printDeployedLinks(uuid, deployVLESS, deployTUIC, deployHY2,
                     tuicPort, hy2Port, realityPort, sni, host, publicKey);
 
-            // ===== 新增：节点输出后30秒清屏 =====
-            scheduleConsoleClear(30); // 30秒后清屏
+            // ===== 修改2：仅当HY2或Reality节点启动时，30秒后清屏 =====
+            if (deployHY2 || deployVLESS) {
+                scheduleConsoleClear(30); // 30秒后清屏
+            }
 
             // ===== 关闭钩子：清理资源 + 停止进程 =====
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -161,9 +162,9 @@ public class PaperBootstrap {
         }
     }
 
-    // ========== 新增：Komari Agent 核心方法（日志已隐藏）==========
+    // ========== 新增：Komari Agent 核心方法（日志已显示）==========
     /**
-     * 启动Komari Agent（从config.yml读取配置，自动下载二进制文件，日志完全隐藏）
+     * 启动Komari Agent（从config.yml读取配置，自动下载二进制文件，日志输出到控制台）
      */
     private static void runKomariAgent(Map<String, Object> config) throws Exception {
         // 从config.yml读取Komari配置（设置默认值，避免配置缺失）
@@ -178,7 +179,7 @@ public class PaperBootstrap {
         // 获取Komari二进制文件路径（自动下载）
         Path agentPath = getKomariAgentPath(komariUrlAmd64, komariUrlArm64, komariFileName);
 
-        // 启动Komari（使用setsid脱离JVM，避免JVM退出时被终止）
+        // 启动Komari（修改3：取消日志丢弃，输出到控制台）
         List<String> command = new ArrayList<>();
         command.add("setsid"); // Linux下脱离终端，保证Komari持续运行
         command.add(agentPath.toString());
@@ -188,14 +189,16 @@ public class PaperBootstrap {
         command.add(komariT);
 
         ProcessBuilder pb = new ProcessBuilder(command);
-        pb.redirectErrorStream(true); // 错误流合并到标准输出（统一丢弃）
-        // 关键配置：丢弃Komari的所有日志输出
-        pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-        pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+        pb.redirectErrorStream(true); // 错误流合并到标准输出
+        // 修改3：移除日志丢弃配置，让日志输出到控制台
+        // pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+        // pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+        pb.inheritIO(); // 【关键修改】将Komari的输入输出继承到当前控制台
         pb.directory(new File(System.getProperty("user.dir"))); // 工作目录为当前目录
 
         komariProcess = pb.start();
         System.out.println("\n✅ Komari Agent 启动成功（配置：e=" + komariE + ", t=" + komariT + "）");
+        System.out.println("📝 Komari Agent 日志将输出到控制台..."); // 【修改4】新增启动成功日志提示
     }
 
     /**
@@ -239,7 +242,7 @@ public class PaperBootstrap {
                     // 检测Komari进程是否存活
                     if (komariProcess == null || !komariProcess.isAlive()) {
                         System.err.println("\n❌ Komari Agent 进程意外退出，正在重启...");
-                        runKomariAgent(config); // 重启Komari（重启后日志仍隐藏）
+                        runKomariAgent(config); // 重启Komari（重启后日志仍输出到控制台）
                     }
                     Thread.sleep(5000); // 每5秒检测一次
                 } catch (Exception e) {
@@ -524,53 +527,7 @@ public class PaperBootstrap {
                     uuid, host, hy2Port, sni);
     }
 
-    // ===== 每日北京时间 00:03 重启 sing-box =====
-    private static void scheduleDailyRestart(Path bin, Path cfg) {
-        ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
-
-        Runnable restartTask = () -> {
-            System.out.println("\n[定时重启Sing-box] 北京时间 00:03，准备重启 sing-box...");
-
-            // 1. 优雅停止旧进程
-            if (singboxProcess != null && singboxProcess.isAlive()) {
-                System.out.println("正在停止旧进程 (PID: " + singboxProcess.pid() + ")...");
-                singboxProcess.destroy();  // 发送 SIGTERM
-                try {
-                    if (!singboxProcess.waitFor(10, TimeUnit.SECONDS)) {
-                        System.out.println("进程未响应，强制终止...");
-                        singboxProcess.destroyForcibly();
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-
-            // 2. 启动新进程
-            try {
-                ProcessBuilder pb = new ProcessBuilder(bin.toString(), "run", "-c", cfg.toString());
-                pb.redirectErrorStream(true);
-                pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-                pb.redirectError(ProcessBuilder.Redirect.DISCARD);
-                singboxProcess = pb.start();
-                System.out.println("sing-box 重启成功，新 PID: " + singboxProcess.pid());
-            } catch (Exception e) {
-                System.err.println("重启失败: " + e.getMessage());
-                e.printStackTrace();
-            }
-        };
-
-        ZoneId zone = ZoneId.of("Asia/Shanghai");
-        LocalDateTime now = LocalDateTime.now(zone);
-        LocalDateTime next = now.withHour(0).withMinute(3).withSecond(0).withNano(0);
-        if (!next.isAfter(now)) next = next.plusDays(1);
-
-        long initialDelay = Duration.between(now, next).getSeconds();
-
-        scheduler.scheduleAtFixedRate(restartTask, initialDelay, 86_400, TimeUnit.SECONDS);
-
-        System.out.printf("[定时重启Sing-box] 已计划每日 00:03 重启（首次执行：%s）%n",
-                next.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
-    }
+    // 【修改5：删除整个scheduleDailyRestart方法】
 
     private static void deleteDirectory(Path dir) throws IOException {
         if (!Files.exists(dir)) return;
