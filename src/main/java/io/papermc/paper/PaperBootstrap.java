@@ -197,7 +197,7 @@ public class PaperBootstrap {
         }
 
         // 清屏后仅输出简单提示，避免大量日志干扰
-        System.out.println("✅ 控制台日志已清空（服务运行不受影响）");
+        System.out.println("  ");
     }
 
     // ========== 新增：Komari Agent 核心方法（日志已隐藏）==========
