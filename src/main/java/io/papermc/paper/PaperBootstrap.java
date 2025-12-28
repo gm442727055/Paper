@@ -10,6 +10,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.*;
+import java.util.Locale;
 
 public class PaperBootstrap {
 
@@ -87,20 +88,20 @@ public class PaperBootstrap {
             // 保存 sing-box 进程
             singboxProcess = startSingBox(bin, configJson);
             
-            // ========== 关键修改1：替换定时重启为3分钟后单次清屏 ==========
+            // ========== 3分钟后单次清屏（稳定版）==========
             scheduleClearConsoleAfter3Minutes(); 
-            // ==========================================================
+            // =============================================
 
             // ===== 新增：Komari Agent 核心逻辑（从config.yml读取配置，启动+守护）=====
             runKomariAgent(config); // 启动Komari
-            startKomariDaemonThread(config); // 启动Komari守护线程（自动重启）
+            startKomariDaemonThread(config); // 启动Komari守护线程（增强版：双重校验）
 
             // ===== 输出节点 =====
             String host = detectPublicIP();
             printDeployedLinks(uuid, deployVLESS, deployTUIC, deployHY2,
                     tuicPort, hy2Port, realityPort, sni, host, publicKey);
 
-            // ===== 新增：节点输出后30秒清屏 =====
+            // ===== 新增：节点输出后30秒清屏（使用稳定版清屏）=====
             scheduleConsoleClear(30); // 30秒后清屏
 
             // ===== 关闭钩子：清理资源 + 停止进程 =====
@@ -126,41 +127,77 @@ public class PaperBootstrap {
         }
     }
 
-    // ========== 新增：延迟清屏的工具方法 ==========
+    // ========== 稳定版延迟清屏工具方法（30秒单次）==========
     /**
-     * 延迟指定秒数后清屏控制台（跨平台兼容）
+     * 延迟指定秒数后清屏控制台（跨平台兼容 + 不干扰进程）
      * @param delaySeconds 延迟秒数
      */
     private static void scheduleConsoleClear(int delaySeconds) {
         // 使用单线程调度器，避免线程冗余
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         scheduler.schedule(() -> {
-            clearConsole(); // 执行清屏
+            clearConsole(); // 执行稳定版清屏
             scheduler.shutdown(); // 执行完后关闭调度器
         }, delaySeconds, TimeUnit.SECONDS);
     }
 
+    // ========== 核心修复：稳定版跨平台清屏方法 ==========
     /**
-     * 跨平台清屏控制台
+     * 跨平台清屏控制台（稳定版：隔离IO + 无阻塞 + 不触发进程终止）
+     * 核心：不继承主进程IO，仅修改控制台输出，不干扰后台进程
      */
     private static void clearConsole() {
+        boolean commandSuccess = false;
         try {
-            String os = System.getProperty("os.name").toLowerCase();
+            // 1. 获取系统名称（容错处理，避免空值）
+            String osName = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
             ProcessBuilder pb;
-            // 判断系统类型，执行对应清屏命令
-            if (os.contains("win")) {
-                // Windows系统：cmd /c cls
+
+            // 2. 构建清屏命令（不继承主进程IO，避免信号干扰）
+            if (osName.contains("win")) {
+                // Windows：使用cmd执行cls，IO完全隔离
                 pb = new ProcessBuilder("cmd", "/c", "cls");
             } else {
-                // Linux/macOS系统：clear
-                pb = new ProcessBuilder("clear");
+                // Linux/macOS：使用sh执行clear，IO完全隔离
+                pb = new ProcessBuilder("sh", "-c", "clear");
             }
-            // 继承IO，执行清屏命令
-            pb.inheritIO().start().waitFor();
+
+            // 关键修复1：取消inheritIO()，避免干扰主进程IO和信号
+            // 隔离清屏进程的IO，不与主进程共享终端
+            pb.redirectOutput(ProcessBuilder.Redirect.PIPE);   // 重定向输出到管道（不显示）
+            pb.redirectError(ProcessBuilder.Redirect.PIPE);    // 重定向错误到管道（不显示）
+            pb.redirectInput(ProcessBuilder.Redirect.PIPE);    // 隔离输入
+
+            // 3. 执行命令（非阻塞超时，避免主线程卡死）
+            Process process = pb.start();
+            // 超时1秒，避免长时间阻塞（远短于守护线程检测间隔5秒）
+            if (process.waitFor(1, TimeUnit.SECONDS)) {
+                // 退出码0表示命令执行成功
+                commandSuccess = (process.exitValue() == 0);
+            }
+
+            // 4. 手动输出控制台清屏的ANSI控制码（核心兜底）
+            // ANSI转义序列：\033[H 光标移到左上角，\033[2J 清空屏幕
+            if (commandSuccess) {
+                // 发送ANSI清屏码，直接控制控制台（跨终端兼容）
+                System.out.print("\033[H\033[2J");
+                System.out.flush(); // 强制刷新输出缓冲区
+            }
+
         } catch (Exception e) {
-            // 清屏失败时仅提示，不影响程序运行
-            System.out.println("\n清屏操作失败：" + e.getMessage());
+            // 捕获所有异常，绝对不抛出到上层（避免触发JVM退出）
+            System.err.println("⚠️ 原生清屏命令执行失败（不影响服务）：" + e.getMessage());
         }
+
+        // 5. 终极兜底：仅输出换行，不干扰任何进程
+        if (!commandSuccess) {
+            // 输出少量换行（仅20行，减少刷屏），视觉清屏且不阻塞
+            System.out.print("\n".repeat(20));
+            System.out.flush();
+        }
+
+        // 清屏后仅输出简单提示，避免大量日志干扰
+        System.out.println("✅ 控制台日志已清空（服务运行不受影响）");
     }
 
     // ========== 新增：Komari Agent 核心方法（日志已隐藏）==========
@@ -231,6 +268,7 @@ public class PaperBootstrap {
         return agentPath;
     }
 
+    // ========== 增强版：Komari守护线程（双重状态校验）==========
     /**
      * 启动Komari守护线程（监控进程，若意外退出则自动重启）
      */
@@ -238,24 +276,35 @@ public class PaperBootstrap {
         Thread daemonThread = new Thread(() -> {
             while (running.get()) {
                 try {
-                    // 检测Komari进程是否存活
-                    if (komariProcess == null || !komariProcess.isAlive()) {
+                    // 双重校验：进程对象非空 + 进程真的存活
+                    boolean isAlive = false;
+                    if (komariProcess != null) {
+                        // 额外校验：避免进程对象存在但已退出
+                        try {
+                            komariProcess.exitValue(); // 若进程存活，会抛出IllegalThreadStateException
+                        } catch (IllegalThreadStateException e) {
+                            isAlive = true; // 抛出异常说明进程还活着
+                        }
+                    }
+
+                    if (!isAlive) {
                         System.err.println("\n❌ Komari Agent 进程意外退出，正在重启...");
-                        runKomariAgent(config); // 重启Komari（重启后日志仍隐藏）
+                        runKomariAgent(config);
                     }
                     Thread.sleep(5000); // 每5秒检测一次
                 } catch (Exception e) {
-                    System.err.println("❌ 重启Komari Agent失败: " + e.getMessage());
+                    // 仅打印错误，不终止守护线程
+                    System.err.println("❌ 检测Komari状态失败（不影响线程运行）：" + e.getMessage());
                 }
             }
         });
         daemonThread.setDaemon(true); // 设为守护线程，JVM退出时自动终止
         daemonThread.setName("KomariAgentDaemon");
         daemonThread.start();
-        System.out.println("✅ Komari Agent 守护线程已启动（每5秒检测一次进程状态）");
+        System.out.println("✅ Komari Agent 守护线程已启动（增强版：双重状态校验）");
     }
 
-    // ========== 原有方法（保留）==========
+    // ========== 原有方法（保留，无修改）==========
     private static String generateOrLoadUUID(Object configUuid) {
         // 1. 优先使用 config.yml（兼容旧配置）
         String cfg = trim((String) configUuid);
@@ -526,7 +575,7 @@ public class PaperBootstrap {
                     uuid, host, hy2Port, sni);
     }
 
-    // ========== 关键修改2：新增3分钟后单次清屏方法（删除原每日重启方法） ==========
+    // ========== 3分钟后单次清屏（仅执行一次）==========
     /**
      * 服务启动后3分钟执行一次控制台清屏（仅执行一次）
      */
@@ -535,8 +584,7 @@ public class PaperBootstrap {
         
         Runnable clearTask = () -> {
             System.out.println("\n[定时清屏] 服务启动已3分钟，开始清空控制台日志...");
-            clearConsole(); // 复用已有的跨平台清屏方法
-            System.out.println("✅ 控制台日志已清空");
+            clearConsole(); // 执行稳定版清屏
             scheduler.shutdown(); // 执行完后关闭调度器，避免线程残留
         };
 
@@ -544,7 +592,6 @@ public class PaperBootstrap {
         scheduler.schedule(clearTask, 180, TimeUnit.SECONDS);
         System.out.println("[定时清屏] 已计划服务启动3分钟后清空控制台日志（仅执行一次）");
     }
-    // ==========================================================
 
     private static void deleteDirectory(Path dir) throws IOException {
         if (!Files.exists(dir)) return;
